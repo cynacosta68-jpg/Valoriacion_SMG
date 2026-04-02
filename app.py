@@ -2,13 +2,13 @@ import streamlit as st
 import pandas as pd
 import io
 
-# Configuración de la página
+# Configuración de la aplicación
 st.set_page_config(page_title="Valorizador SMG Profesional", layout="wide")
 
 st.title("🏥 Sistema de Valorización Médica (SMG)")
 st.info("Este sistema replica la lógica completa de tu Google Colab.")
 
-# --- FUNCIONES DE LIMPIEZA ORIGINALES DEL COLAB ---
+# --- FUNCIONES DE LIMPIEZA ---
 def limpiar_codigo(x):
     if pd.isna(x): return ""
     return str(x).split('.')[0].strip().upper()
@@ -19,25 +19,34 @@ def limpiar_texto(x):
 
 def procesar_valorizacion_completa(df_liqui, db_valor):
     try:
-        # 1. Preparación del reporte (Igual a limpiar_bloque_1 de tu Colab)
+        # 1. Preparación del reporte (Limpiar nombres de columnas de inmediato)
         df_f = df_liqui.dropna(how='all').copy()
         df_f.columns = [str(c).strip() for c in df_f.columns]
-        # Limpieza de duplicados por transacción para asegurar los 8289 registros
+        
+        # Limpieza de duplicados por transacción para asegurar los 8289 registros originales
         df_f = df_f.drop_duplicates(subset=['transacción_item'], keep='first')
         
-        # 2. Carga de hojas de la base de valorización
+        # 2. Carga y limpieza de hojas de la base de datos
         df_nom = db_valor['Nomenclador'].copy()
         df_uni = db_valor['unidades'].copy()
         df_fijos = db_valor['Valor Fijos'].copy()
+        
+        df_nom.columns = [str(c).strip() for c in df_nom.columns]
+        df_uni.columns = [str(c).strip() for c in df_uni.columns]
+        df_fijos.columns = [str(c).strip() for c in df_fijos.columns]
 
         # 3. Normalización de Datos para cruce
         df_f['prest_limpia'] = df_f['prestación'].apply(limpiar_codigo)
         df_nom['cod_limpio'] = df_nom['Código'].apply(limpiar_codigo)
         df_fijos['cod_limpio'] = df_fijos['Cod'].apply(limpiar_codigo)
         
-        # Detección de Categoría
-        col_cat = next((c for c in df_f.columns if c.lower() in ['categoria', 'categoría']), 'categoria')
-        df_f['cat_limpia'] = df_f[col_cat].apply(limpiar_texto)
+        # Búsqueda flexible de la columna categoría (evita el KeyError 'categoria')
+        col_cat_reporte = next((c for c in df_f.columns if c.lower() in ['categoria', 'categoría']), None)
+        if not col_cat_reporte:
+            st.error("❌ No se encontró la columna 'categoria' o 'categoría' en el archivo de liquidación.")
+            return None
+            
+        df_f['cat_limpia'] = df_f[col_cat_reporte].apply(limpiar_texto)
         df_fijos['cat_limpia'] = df_fijos['Arancel'].apply(limpiar_texto)
 
         # Fechas a periodos (YYYY-MM)
@@ -46,20 +55,19 @@ def procesar_valorizacion_completa(df_liqui, db_valor):
         df_fijos['periodo_aux'] = pd.to_datetime(df_fijos['Periodo'], errors='coerce').dt.to_period('M')
 
         # --- REGLA 1: NOMENCLADOR + UNIDADES ---
-        # Unimos Nomenclador con Unidades (usando los nombres exactos del Excel)
         df_calc_uni = pd.merge(
             df_nom, df_uni, 
             left_on=['Tipo de nomenclador'], 
             right_on=['Tipo de Nomenclador'], 
             how='inner'
         )
-        # Filtramos para que coincida el periodo del valor de la unidad
-        df_calc_uni = df_calc_uni[df_calc_uni['periodo_aux_x'] == df_calc_uni['periodo_aux_y']] if 'periodo_aux_x' in df_calc_uni.columns else df_calc_uni
+        # Sincronizar periodos si existen en ambas
+        if 'periodo_aux_x' in df_calc_uni.columns and 'periodo_aux_y' in df_calc_uni.columns:
+             df_calc_uni = df_calc_uni[df_calc_uni['periodo_aux_x'] == df_calc_uni['periodo_aux_y']]
         
         df_calc_uni['IMPORTE_R1'] = pd.to_numeric(df_calc_uni['Cirujano'], errors='coerce') * pd.to_numeric(df_calc_uni['Valor'], errors='coerce')
         df_calc_uni = df_calc_uni.drop_duplicates(subset=['cod_limpio', 'periodo_aux' if 'periodo_aux' in df_calc_uni.columns else 'periodo_aux_y'])
         
-        # Cruzamos con el reporte principal
         df_f = pd.merge(df_f, df_calc_uni[['cod_limpio', 'IMPORTE_R1']], 
                         left_on=['prest_limpia'], right_on=['cod_limpio'], how='left')
 
@@ -78,7 +86,7 @@ def procesar_valorizacion_completa(df_liqui, db_valor):
                         left_on=['prest_limpia', 'periodo_aux'], right_on=['cod_limpio', 'periodo_aux'], 
                         how='left', suffixes=('', '_R2B'))
 
-        # --- REGLA 3: VALOR FIJOS (SIN FILTROS) ---
+        # --- REGLA 3: VALOR FIJOS (SIN FILTROS - TODA LA HOJA) ---
         f_3 = df_fijos.drop_duplicates(subset=['cod_limpio', 'cat_limpia', 'periodo_aux'])
         df_f = pd.merge(df_f, f_3[['cod_limpio', 'cat_limpia', 'periodo_aux', 'Total prestación']], 
                         left_on=['prest_limpia', 'cat_limpia', 'periodo_aux'], 
@@ -95,13 +103,13 @@ def procesar_valorizacion_completa(df_liqui, db_valor):
 
         df_f['IMPORTE'] = df_f.apply(consolidar, axis=1)
         
-        # Columna Total
+        # Columna Total (IMPORTE * cantidad)
         def calcular_total(row):
             try: return float(row['IMPORTE']) * float(row['cantidad'])
             except: return row['IMPORTE']
         df_f['Total'] = df_f.apply(calcular_total, axis=1)
 
-        # --- LIMPIEZA FINAL DE AUXILIARES Y DUPLICADOS ---
+        # --- LIMPIEZA FINAL ---
         df_f = df_f.drop_duplicates(subset=['transacción_item'], keep='first')
         aux = ['_limpia', 'periodo_aux', 'cod_limpio', 'cat_limpia', 'IMPORTE_R1', 'Total prestación', 'Tipo de Nomenclador']
         cols_finales = [c for c in df_f.columns if not any(a in c for a in aux) or c in ['IMPORTE', 'Total']]
@@ -113,12 +121,12 @@ def procesar_valorizacion_completa(df_liqui, db_valor):
         return None
 
 # --- INTERFAZ ---
-st.sidebar.header("Archivos")
-f1 = st.sidebar.file_uploader("Reporte de Liquidación", type=["xlsx", "csv"])
-f2 = st.sidebar.file_uploader("Base de Valorización", type=["xlsx"])
+st.sidebar.header("📁 Carga de Archivos")
+f1 = st.sidebar.file_uploader("1. Reporte de Liquidación", type=["xlsx", "csv"])
+f2 = st.sidebar.file_uploader("2. Base de Valorización", type=["xlsx"])
 
 if f1 and f2:
-    if st.button("🚀 Procesar"):
+    if st.button("🚀 Iniciar Procesamiento"):
         if f1.name.endswith('.csv'):
             df_l = pd.read_csv(f1, encoding='latin1', sep=None, engine='python')
         else:
@@ -129,11 +137,16 @@ if f1 and f2:
         res = procesar_valorizacion_completa(df_l, db_v)
         
         if res is not None:
-            st.success(f"Procesado: {len(res)} registros.")
+            st.success(f"✅ Procesado exitosamente: {len(res)} registros.")
             st.dataframe(res.head(50))
             
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
                 res.to_excel(writer, index=False)
             
-            st.download_button("📥 Descargar Excel", output.getvalue(), "reporte_valorizado.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            st.download_button(
+                label="📥 Descargar Excel Valorizado",
+                data=output.getvalue(),
+                file_name="reporte_final_valorizado.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
