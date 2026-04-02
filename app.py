@@ -21,17 +21,35 @@ def limpiar_texto(x):
     return str(x).strip().upper()
 
 def procesar_valorizacion(df_f, db_val):
-    # 1. Limpieza de duplicados inicial en el reporte
+    # 0. Limpiar nombres de columnas (quita espacios y errores de carga)
+    df_f.columns = [str(c).strip() for c in df_f.columns]
+    
+    # 1. Identificar columna de categoría (flexible a acentos/mayúsculas)
+    col_cat = None
+    for c in ['categoria', 'Categoría', 'CATEGORIA', 'CATEGORÍA']:
+        if c in df_f.columns:
+            col_cat = c
+            break
+    
+    if not col_cat:
+        st.error("❌ No se encontró la columna 'categoria' en el archivo de liquidación.")
+        return None
+
+    # 2. Limpieza de duplicados inicial
     df_f = df_f.drop_duplicates(subset=['transacción_item'], keep='first').copy()
     
-    # 2. Carga de hojas de la base de datos
+    # 3. Carga y limpieza de hojas de la base de datos
     df_nom = db_val['Nomenclador'].copy()
     df_uni = db_val['unidades'].copy()
     df_fijos = db_val['Valor Fijos'].copy()
+    
+    df_nom.columns = [str(c).strip() for c in df_nom.columns]
+    df_uni.columns = [str(c).strip() for c in df_uni.columns]
+    df_fijos.columns = [str(c).strip() for c in df_fijos.columns]
 
-    # 3. Normalización de Datos
+    # 4. Normalización de Datos
     df_f['prest_limpia'] = df_f['prestación'].apply(limpiar_codigo)
-    df_f['cat_limpia'] = df_f['categoria'].apply(limpiar_texto)
+    df_f['cat_limpia'] = df_f[col_cat].apply(limpiar_texto)
     df_nom['cod_limpio'] = df_nom['Código'].apply(limpiar_codigo)
     df_fijos['cod_limpio'] = df_fijos['Cod'].apply(limpiar_codigo)
     df_fijos['cat_limpia'] = df_fijos['Arancel'].apply(limpiar_texto)
@@ -52,13 +70,11 @@ def procesar_valorizacion(df_f, db_val):
     # --- REGLA 2: VALOR FIJOS (SWISS MEDICAL) ---
     f_filt = df_fijos[df_fijos['Nomenclador'].str.contains('SWISS MEDICAL', na=True, case=False)].copy()
     
-    # 2A: Con Categoría
     f_2a = f_filt.drop_duplicates(subset=['cod_limpio', 'cat_limpia', 'periodo_aux'])
     df_f = pd.merge(df_f, f_2a[['cod_limpio', 'cat_limpia', 'periodo_aux', 'Total prestación']], 
                     left_on=['prest_limpia', 'cat_limpia', 'periodo_aux'], right_on=['cod_limpio', 'cat_limpia', 'periodo_aux'], 
                     how='left', suffixes=('', '_R2A'))
     
-    # 2B: Sin Categoría
     f_2b = f_filt.drop_duplicates(subset=['cod_limpio', 'periodo_aux'])
     df_f = pd.merge(df_f, f_2b[['cod_limpio', 'periodo_aux', 'Total prestación']], 
                     left_on=['prest_limpia', 'periodo_aux'], right_on=['cod_limpio', 'periodo_aux'], 
@@ -89,7 +105,6 @@ def procesar_valorizacion(df_f, db_val):
 
     # --- LIMPIEZA FINAL ---
     df_f = df_f.drop_duplicates(subset=['transacción_item'], keep='first')
-    # Borrar auxiliares
     prohibidas = ['_limpia', 'periodo_aux', 'cod_limpio', 'cat_limpia', 'IMPORTE_R1', 'Total prestación']
     cols_a_borrar = [c for c in df_f.columns if any(p in c for p in prohibidas) and c not in ['IMPORTE', 'Total']]
     
@@ -110,17 +125,17 @@ if archivo_liqui and archivo_base:
         with st.spinner("Procesando reglas de valorización..."):
             df_final = procesar_valorizacion(df_liqui, db_valor)
         
-        st.success(f"¡Listo! Se procesaron {len(df_final)} registros únicos.")
-        st.dataframe(df_final.head(50))
-        
-        # Generar descarga
-        towrite = io.BytesIO()
-        df_final.to_excel(towrite, index=False, engine='openpyxl')
-        towrite.seek(0)
-        
-        st.download_button(
-            label="📥 Descargar Reporte Valorizado",
-            data=towrite,
-            file_name="reporte_final_valorizado.xlsx",
-            mime="application/vnd.ms-excel"
-        )
+        if df_final is not None:
+            st.success(f"¡Listo! Se procesaron {len(df_final)} registros únicos.")
+            st.dataframe(df_final.head(50))
+            
+            towrite = io.BytesIO()
+            df_final.to_excel(towrite, index=False, engine='openpyxl')
+            towrite.seek(0)
+            
+            st.download_button(
+                label="📥 Descargar Reporte Valorizado",
+                data=towrite,
+                file_name="reporte_final_valorizado.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
