@@ -159,6 +159,10 @@ if 'df_bloque_2' in st.session_state and st.session_state['df_bloque_2'] is not 
 
                 df_final = df_merged[columns_to_include_in_final_df].copy()
 
+                # Store df_final in session_state
+                st.session_state['df_final'] = df_final
+                st.session_state['df_evweb'] = df_evweb # Also store df_evweb for the next step
+
                 # Removed download button for df_final as per user request
 
         except Exception as e:
@@ -309,4 +313,3 @@ if 'df_final' in st.session_state and st.session_state['df_final'] is not None a
 
 else:
     st.info("Completa los Bloques anteriores para realizar la valorización.")
-
