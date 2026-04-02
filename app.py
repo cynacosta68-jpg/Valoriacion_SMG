@@ -2,13 +2,13 @@ import streamlit as st
 import pandas as pd
 import io
 
-# Configuración de página
-st.set_page_config(page_title="Valorizador de Prestaciones SMG", layout="wide")
+# Configuración de la página
+st.set_page_config(page_title="Valorizador SMG Profesional", layout="wide")
 
-st.title("🏥 Sistema de Valorización Médica Profesional")
-st.markdown("Este sistema replica la lógica completa de tu Colab para la liquidación y valorización.")
+st.title("🏥 Sistema de Valorización Médica (SMG)")
+st.info("Este sistema replica la lógica completa de tu Google Colab.")
 
-# --- FUNCIONES DE LIMPIEZA Y NORMALIZACIÓN ---
+# --- FUNCIONES DE LIMPIEZA ORIGINALES DEL COLAB ---
 def limpiar_codigo(x):
     if pd.isna(x): return ""
     return str(x).split('.')[0].strip().upper()
@@ -17,51 +17,53 @@ def limpiar_texto(x):
     if pd.isna(x): return ""
     return str(x).strip().upper()
 
-def procesar_flujo_completo(df_liqui, db_valor):
+def procesar_valorizacion_completa(df_liqui, db_valor):
     try:
-        # --- PASO 1: LIMPIEZA SEGÚN TU COLAB ---
-        # Eliminamos filas totalmente vacías y duplicados por transacción
+        # 1. Preparación del reporte (Igual a limpiar_bloque_1 de tu Colab)
         df_f = df_liqui.dropna(how='all').copy()
+        df_f.columns = [str(c).strip() for c in df_f.columns]
+        # Limpieza de duplicados por transacción para asegurar los 8289 registros
         df_f = df_f.drop_duplicates(subset=['transacción_item'], keep='first')
         
-        # Limpieza de nombres de columnas (quita espacios invisibles)
-        df_f.columns = [str(c).strip() for c in df_f.columns]
-        
-        # --- PASO 2: PREPARACIÓN DE BASES ---
+        # 2. Carga de hojas de la base de valorización
         df_nom = db_valor['Nomenclador'].copy()
         df_uni = db_valor['unidades'].copy()
         df_fijos = db_valor['Valor Fijos'].copy()
-        
-        df_nom.columns = [str(c).strip() for c in df_nom.columns]
-        df_uni.columns = [str(c).strip() for c in df_uni.columns]
-        df_fijos.columns = [str(c).strip() for c in df_fijos.columns]
 
-        # Normalización para el Macheo
+        # 3. Normalización de Datos para cruce
         df_f['prest_limpia'] = df_f['prestación'].apply(limpiar_codigo)
         df_nom['cod_limpio'] = df_nom['Código'].apply(limpiar_codigo)
         df_fijos['cod_limpio'] = df_fijos['Cod'].apply(limpiar_codigo)
         
-        # Categoría (Flexible a nombres de columna)
+        # Detección de Categoría
         col_cat = next((c for c in df_f.columns if c.lower() in ['categoria', 'categoría']), 'categoria')
         df_f['cat_limpia'] = df_f[col_cat].apply(limpiar_texto)
         df_fijos['cat_limpia'] = df_fijos['Arancel'].apply(limpiar_texto)
 
-        # Fechas a periodos Mes-Año
+        # Fechas a periodos (YYYY-MM)
         df_f['periodo_aux'] = pd.to_datetime(df_f['fecha_transaccion'], dayfirst=True, errors='coerce').dt.to_period('M')
         df_uni['periodo_aux'] = pd.to_datetime(df_uni['Mes'], errors='coerce').dt.to_period('M')
         df_fijos['periodo_aux'] = pd.to_datetime(df_fijos['Periodo'], errors='coerce').dt.to_period('M')
 
-        # --- PASO 3: REGLAS DE VALORIZACIÓN (Merges de alta velocidad) ---
+        # --- REGLA 1: NOMENCLADOR + UNIDADES ---
+        # Unimos Nomenclador con Unidades (usando los nombres exactos del Excel)
+        df_calc_uni = pd.merge(
+            df_nom, df_uni, 
+            left_on=['Tipo de nomenclador'], 
+            right_on=['Tipo de Nomenclador'], 
+            how='inner'
+        )
+        # Filtramos para que coincida el periodo del valor de la unidad
+        df_calc_uni = df_calc_uni[df_calc_uni['periodo_aux_x'] == df_calc_uni['periodo_aux_y']] if 'periodo_aux_x' in df_calc_uni.columns else df_calc_uni
         
-        # REGLA 1: Nomenclador + Unidades
-        df_calc_uni = pd.merge(df_nom, df_uni, left_on=['Tipo de nomenclador'], right_on=['Tipo de Nomenclador'], how='inner')
         df_calc_uni['IMPORTE_R1'] = pd.to_numeric(df_calc_uni['Cirujano'], errors='coerce') * pd.to_numeric(df_calc_uni['Valor'], errors='coerce')
-        df_calc_uni = df_calc_uni.drop_duplicates(subset=['cod_limpio', 'periodo_aux'])
+        df_calc_uni = df_calc_uni.drop_duplicates(subset=['cod_limpio', 'periodo_aux' if 'periodo_aux' in df_calc_uni.columns else 'periodo_aux_y'])
         
-        df_f = pd.merge(df_f, df_calc_uni[['cod_limpio', 'periodo_aux', 'IMPORTE_R1']],
-                        left_on=['prest_limpia', 'periodo_aux'], right_on=['cod_limpio', 'periodo_aux'], how='left')
+        # Cruzamos con el reporte principal
+        df_f = pd.merge(df_f, df_calc_uni[['cod_limpio', 'IMPORTE_R1']], 
+                        left_on=['prest_limpia'], right_on=['cod_limpio'], how='left')
 
-        # REGLA 2: Valor Fijos (Con filtro SWISS MEDICAL)
+        # --- REGLA 2: VALOR FIJOS (SWISS MEDICAL) ---
         f_filt = df_fijos[df_fijos['Nomenclador'].astype(str).str.contains('SWISS MEDICAL', na=True, case=False)].copy()
         
         # 2A: Con Categoría
@@ -76,76 +78,62 @@ def procesar_flujo_completo(df_liqui, db_valor):
                         left_on=['prest_limpia', 'periodo_aux'], right_on=['cod_limpio', 'periodo_aux'], 
                         how='left', suffixes=('', '_R2B'))
 
-        # REGLA 3: Valor Fijos (SIN FILTROS - TODA LA TABLA)
+        # --- REGLA 3: VALOR FIJOS (SIN FILTROS) ---
         f_3 = df_fijos.drop_duplicates(subset=['cod_limpio', 'cat_limpia', 'periodo_aux'])
         df_f = pd.merge(df_f, f_3[['cod_limpio', 'cat_limpia', 'periodo_aux', 'Total prestación']], 
                         left_on=['prest_limpia', 'cat_limpia', 'periodo_aux'], 
                         right_on=['cod_limpio', 'cat_limpia', 'periodo_aux'], 
                         how='left', suffixes=('', '_R3'))
 
-        # --- PASO 4: CONSOLIDACIÓN DE RESULTADOS ---
+        # --- CONSOLIDACIÓN ---
         def consolidar(row):
-            if pd.notna(row['IMPORTE_R1']): return row['IMPORTE_R1']
+            if pd.notna(row.get('IMPORTE_R1')): return row['IMPORTE_R1']
             if pd.notna(row.get('Total prestación')): return row['Total prestación']
             if pd.notna(row.get('Total prestación_R2B')): return row['Total prestación_R2B']
             if pd.notna(row.get('Total prestación_R3')): return row['Total prestación_R3']
             return "#REVISAR VALORES"
 
         df_f['IMPORTE'] = df_f.apply(consolidar, axis=1)
-
-        # Cálculo de Columna TOTAL
-        def calcular_total_final(row):
-            try:
-                return float(row['IMPORTE']) * float(row['cantidad'])
-            except:
-                return row['IMPORTE']
         
-        df_f['Total'] = df_f.apply(calcular_total_final, axis=1)
+        # Columna Total
+        def calcular_total(row):
+            try: return float(row['IMPORTE']) * float(row['cantidad'])
+            except: return row['IMPORTE']
+        df_f['Total'] = df_f.apply(calcular_total, axis=1)
 
-        # --- PASO 5: LIMPIEZA FINAL DE COLUMNAS ---
-        # Mantenemos las columnas originales + IMPORTE y Total
-        # Borramos todas las creadas por el proceso de unión
-        auxiliares = ['_limpia', 'periodo_aux', 'cod_limpio', 'cat_limpia', 'IMPORTE_R1', 'Total prestación', 'Tipo de Nomenclador']
-        cols_finales = [c for c in df_f.columns if not any(a in c for a in auxiliares) or c in ['IMPORTE', 'Total']]
+        # --- LIMPIEZA FINAL DE AUXILIARES Y DUPLICADOS ---
+        df_f = df_f.drop_duplicates(subset=['transacción_item'], keep='first')
+        aux = ['_limpia', 'periodo_aux', 'cod_limpio', 'cat_limpia', 'IMPORTE_R1', 'Total prestación', 'Tipo de Nomenclador']
+        cols_finales = [c for c in df_f.columns if not any(a in c for a in aux) or c in ['IMPORTE', 'Total']]
         
         return df_f[cols_finales]
 
     except Exception as e:
-        st.error(f"Error en la lógica de procesamiento: {e}")
+        st.error(f"Error detallado: {e}")
         return None
 
-# --- INTERFAZ STREAMLIT ---
-st.sidebar.header("📥 Carga de Datos")
-file_rep = st.sidebar.file_uploader("1. Reporte de Liquidación (Excel/CSV)", type=["xlsx", "csv"])
-file_val = st.sidebar.file_uploader("2. Base de Valorización (Excel)", type=["xlsx"])
+# --- INTERFAZ ---
+st.sidebar.header("Archivos")
+f1 = st.sidebar.file_uploader("Reporte de Liquidación", type=["xlsx", "csv"])
+f2 = st.sidebar.file_uploader("Base de Valorización", type=["xlsx"])
 
-if file_rep and file_val:
-    if st.button("🚀 Iniciar Valorización"):
-        # Lectura robusta
-        if file_rep.name.endswith('.csv'):
-            df_in = pd.read_csv(file_rep, encoding='latin1', sep=None, engine='python')
+if f1 and f2:
+    if st.button("🚀 Procesar"):
+        if f1.name.endswith('.csv'):
+            df_l = pd.read_csv(f1, encoding='latin1', sep=None, engine='python')
         else:
-            df_in = pd.read_excel(file_rep)
+            df_l = pd.read_excel(f1)
         
-        db_in = pd.read_excel(file_val, sheet_name=None)
+        db_v = pd.read_excel(f2, sheet_name=None)
         
-        with st.spinner("Ejecutando pasos del Colab..."):
-            df_res = procesar_flujo_completo(df_in, db_in)
+        res = procesar_valorizacion_completa(df_l, db_v)
+        
+        if res is not None:
+            st.success(f"Procesado: {len(res)} registros.")
+            st.dataframe(res.head(50))
             
-        if df_res is not None:
-            st.success(f"✅ ¡Proceso Exitoso! {len(df_res)} registros procesados.")
-            st.dataframe(df_res.head(100))
-            
-            # Preparar Excel para descargar
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                df_res.to_excel(writer, index=False)
+                res.to_excel(writer, index=False)
             
-            st.download_button(
-                label="📥 Descargar Reporte Final",
-                data=output.getvalue(),
-                file_name="reporte_valorizado_smg.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-else:
-    st.info("Sube los archivos para comenzar. Se aplicará la limpieza de duplicados y las 3 reglas de valorización.")
+            st.download_button("📥 Descargar Excel", output.getvalue(), "reporte_valorizado.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
