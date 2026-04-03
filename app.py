@@ -2,146 +2,180 @@ import streamlit as st
 import pandas as pd
 import io
 
-# Configuración inicial
-st.set_page_config(layout="wide", page_title="Procesador SMG")
+st.set_page_config(layout='wide')
+st.title('Aplicación de Procesamiento y Valorización de Reportes')
 
-st.title("🏥 Aplicación de Procesamiento y Valorización de Reportes")
+# --- Bloque 1: Limpieza del Reporte de Liquidación ---
+st.header('Bloque 1: Limpieza del Reporte de Liquidación')
 
-# --- Bloque 1: Limpieza del Reporte ---
-st.header("Bloque 1: Limpieza del Reporte de Liquidación")
-uploaded_file_liquidacion = st.file_uploader("🚀 Paso 1: Sube el reporte", type=['csv', 'xlsx'], key="liq")
+uploaded_file_liquidacion = st.file_uploader(
+    '🚀 Paso 1: Sube el archivo Reporte de Liquidacion 1',
+    type=['csv', 'xlsx'],
+    key='liquidacion_file'
+)
 
 if uploaded_file_liquidacion is not None:
-    file_name = uploaded_file_liquidacion.name
-    if file_name.endswith('.csv'):
-        try:
-            df = pd.read_csv(uploaded_file_liquidacion, encoding='latin1', sep=';')
-        except:
-            uploaded_file_liquidacion.seek(0)
-            df = pd.read_csv(uploaded_file_liquidacion, encoding='latin1', sep=',')
-    else:
-        df = pd.read_excel(uploaded_file_liquidacion)
-
-    columnas_a_borrar = ['prestador', 'Razón_Social', 'cuit', 'transacción_ticket', 'fecha_prestacion', 'transacción_tipo', 'autorización', 'efector', 'efector_matricula', 'prescriptor', 'prescriptor_matricula', 'prescriptor_razón_social', 'icd', 'terminal', 'terminal_domicilio']
-    df_limpio = df.drop(columns=[col for col in columnas_a_borrar if col in df.columns], errors='ignore').dropna(how='all')
-    st.session_state['df_bloque_2'] = df_limpio
-    st.success("✅ Reporte procesado.")
-
-# --- Bloque 2: Integración de Datos (EVWEB) ---
-st.header("Bloque 2: Integración de Datos Adicionales")
-if 'df_bloque_2' in st.session_state:
-    uploaded_file_valorizacion = st.file_uploader("🚀 Paso 2: Sube la 'Base de datos_valorizacion.xlsx'", type=['xlsx'], key="val")
-    if uploaded_file_valorizacion is not None:
-        xls = pd.ExcelFile(uploaded_file_valorizacion)
-        nombre_hoja = next((s for s in xls.sheet_names if 'evweb' in s.lower()), xls.sheet_names[0])
-        df_evweb = pd.read_excel(xls, sheet_name=nombre_hoja)
-        
-        # Limpieza de CUIT para el merge (igual que en Colab)
-        df_reporte = st.session_state['df_bloque_2'].copy()
-        df_reporte['efector_cuit'] = df_reporte['efector_cuit'].astype(str).str.split('.').str[0].str.strip()
-        df_evweb['CUIT'] = df_evweb['CUIT'].astype(str).str.split('.').str[0].str.strip()
-
-        df_merged = df_reporte.merge(df_evweb, left_on='efector_cuit', right_on='CUIT', how='left')
-        df_merged['cuenta_matricula'] = df_merged.get('Matricula')
-        df_merged['especialidad_medica'] = df_merged.get('Especialidad')
-
-        # Asignación de categoría
-        if 'Categoria' in df_merged.columns: df_merged['categoria'] = df_merged['Categoria']
-        elif 'Arancel' in df_merged.columns: df_merged['categoria'] = df_merged['Arancel']
-        else: df_merged['categoria'] = df_merged.get('Matricula')
-
-        # IVA y OS
-        df_merged['IVA_Template'] = df_merged.apply(lambda r: '0' if (str(r.get('Responsabilidad Fiscal')) in ['Monotributo', 'Exento'] or r.get('condición_iva') == 'Exento') else '1', axis=1)
-        df_merged['Tipo_OS'] = df_merged.apply(lambda r: '11062' if str(r.get('Responsabilidad Fiscal')) == 'Responsable Inscripto' else '11060', axis=1)
-
-        cols_finales = df_reporte.columns.tolist() + ['cuenta_matricula', 'especialidad_medica', 'categoria', 'IVA_Template', 'Tipo_OS']
-        st.session_state['df_final'] = df_merged[cols_finales].copy()
-        st.session_state['xls_v'] = uploaded_file_valorizacion
-        st.success("✅ Prestadores integrados.")
-
-# --- Bloque 3: Valorización (RÉPLICA EXACTA COLAB) ---
-st.header("Bloque 3: Valorización")
-if 'df_final' in st.session_state:
-    if st.button("🚀 Ejecutar Valorización Definitiva"):
-        df_f = st.session_state['df_final'].copy()
-        df_f = df_f.drop_duplicates(subset=['transacción_item'], keep='first')
-
-        xls_v = pd.ExcelFile(st.session_state['xls_v'])
-        df_nom = pd.read_excel(xls_v, sheet_name='Nomenclador')
-        df_uni = pd.read_excel(xls_v, sheet_name='unidades')
-        df_fijos = pd.read_excel(xls_v, sheet_name='Valor Fijos')
-
-        # Normalización estricta (Paso a paso de Colab)
-        def limpiar(x): return str(x).split('.')[0].strip().upper() if pd.notna(x) else ""
-        
-        df_f['prest_limpia'] = df_f['prestación'].apply(limpiar)
-        df_f['cat_limpia'] = df_f['categoria'].apply(limpiar)
-        df_nom['cod_limpio'] = df_nom['Código'].apply(limpiar)
-        df_fijos['cod_limpio'] = df_fijos['Cod'].apply(limpiar)
-        df_fijos['cat_limpia'] = df_fijos['Arancel'].apply(limpiar)
-
-        df_f['periodo_aux'] = pd.to_datetime(df_f['fecha_transaccion'], dayfirst=True, errors='coerce').dt.to_period('M')
-        df_uni['periodo_aux'] = pd.to_datetime(df_uni['Mes'], errors='coerce').dt.to_period('M')
-        df_fijos['periodo_aux'] = pd.to_datetime(df_fijos['Periodo'], errors='coerce').dt.to_period('M')
-
-        # REGLA 1: NOMENCLADOR
-        df_calc_uni = pd.merge(df_nom, df_uni, left_on=['Tipo de nomenclador'], right_on=['Tipo de Nomenclador'], how='inner')
-        df_calc_uni['IMPORTE_R1'] = pd.to_numeric(df_calc_uni['Cirujano'], errors='coerce') * pd.to_numeric(df_calc_uni['Valor'], errors='coerce')
-        df_calc_uni = df_calc_uni.drop_duplicates(subset=['cod_limpio', 'periodo_aux'])
-        
-        df_f = pd.merge(df_f, df_calc_uni[['cod_limpio', 'periodo_aux', 'IMPORTE_R1']], 
-                        left_on=['prest_limpia', 'periodo_aux'], right_on=['cod_limpio', 'periodo_aux'], how='left')
-
-        # REGLA 2: VALOR FIJOS SWISS
-        f_filt = df_fijos[df_fijos['Nomenclador'].astype(str).str.contains('SWISS MEDICAL', na=False, case=False)].copy()
-        
-        # 2A: Match A (Con Categoría)
-        f_2a = f_filt.drop_duplicates(subset=['cod_limpio', 'cat_limpia', 'periodo_aux'])
-        df_f = pd.merge(df_f, f_2a[['cod_limpio', 'cat_limpia', 'periodo_aux', 'Total prestación']], 
-                        left_on=['prest_limpia', 'cat_limpia', 'periodo_aux'], right_on=['cod_limpio', 'cat_limpia', 'periodo_aux'], how='left')
-
-        # 2B: Match B (Sin Categoría)
-        f_2b = f_filt.drop_duplicates(subset=['cod_limpio', 'periodo_aux'])
-        df_f = pd.merge(df_f, f_2b[['cod_limpio', 'periodo_aux', 'Total prestación']], 
-                        left_on=['prest_limpia', 'periodo_aux'], right_on=['cod_limpio', 'periodo_aux'], how='left', suffixes=('', '_R2B'))
-
-        # REGLA 3: VALOR FIJOS GLOBAL
-        f_3 = df_fijos.drop_duplicates(subset=['cod_limpio', 'cat_limpia', 'periodo_aux'])
-        df_f = pd.merge(df_f, f_3[['cod_limpio', 'cat_limpia', 'periodo_aux', 'Total prestación']], 
-                        left_on=['prest_limpia', 'cat_limpia', 'periodo_aux'], right_on=['cod_limpio', 'cat_limpia', 'periodo_aux'], how='left', suffixes=('', '_R3'))
-
-        # --- CONSOLIDACIÓN (LÓGICA COLAB) ---
-        def consolidar_importe(row):
-            # Prioridad 1: Nomenclador
-            if pd.notna(row.get('IMPORTE_R1')): return row['IMPORTE_R1']
-            # Prioridad 2: Swiss (Match con Categoría)
-            if pd.notna(row.get('Total prestación')): return row['Total prestación']
-            # Prioridad 3: Swiss (Match sin Categoría)
-            if pd.notna(row.get('Total prestación_R2B')): return row['Total prestación_R2B']
-            # Prioridad 4: Fijos Global
-            if pd.notna(row.get('Total prestación_R3')): return row['Total prestación_R3']
-            return "#REVISAR VALORES"
-
-        df_f['IMPORTE'] = df_f.apply(consolidar_importe, axis=1)
-        
-        # Cálculo Total
-        def calcular_total(row):
+    try:
+        file_name = uploaded_file_liquidacion.name
+        if file_name.endswith('.csv'):
             try:
-                if row['IMPORTE'] == "#REVISAR VALORES": return "#REVISAR VALORES"
-                return float(row['IMPORTE']) * float(row['cantidad'])
-            except: return row['IMPORTE']
+                df = pd.read_csv(uploaded_file_liquidacion, encoding='latin1', sep=';')
+            except:
+                uploaded_file_liquidacion.seek(0)
+                df = pd.read_csv(uploaded_file_liquidacion, encoding='latin1', sep=',')
+        else:
+            df = pd.read_excel(uploaded_file_liquidacion)
 
-        df_f['Total'] = df_f.apply(calcular_total, axis=1)
+        columnas_a_borrar = [
+            'prestador', 'Razón_Social', 'cuit', 'transacción_ticket',
+            'fecha_prestacion', 'transacción_tipo', 'autorización',
+            'efector', 'efector_matricula', 'prescriptor',
+            'prescriptor_matricula', 'prescriptor_razón_social',
+            'icd', 'terminal', 'terminal_domicilio'
+        ]
+        columnas_presentes = [col for col in columnas_a_borrar if col in df.columns]
+        df_limpio = df.drop(columns=columnas_presentes, errors='ignore').dropna(how='all')
 
-        # Limpieza final (quitar columnas de cruce)
-        prohibidas = ['_limpia', 'periodo_aux', 'cod_limpio', 'cat_limpia', 'IMPORTE_R1', 'Total prestación', 'Tipo de Nomenclador']
-        cols_finales = [c for c in df_f.columns if not any(p in c for p in prohibidas) or c in ['IMPORTE', 'Total']]
-        df_resultado = df_f[cols_finales].copy()
+        # Normalizar CUIT para evitar errores de tipo
+        if 'efector_cuit' in df_limpio.columns:
+            df_limpio['efector_cuit'] = df_limpio['efector_cuit'].astype(str).str.split('.').str[0]
 
-        st.success("✅ Valorización terminada.")
-        st.dataframe(df_resultado.head(100))
-        
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            df_resultado.to_excel(writer, index=False)
-        st.download_button("📥 Descargar Reporte FINAL", output.getvalue(), "reporte_valorizado.xlsx")
+        st.session_state['df_bloque_2'] = df_limpio
+        st.success('✅ Paso 1 completado: Reporte de liquidación procesado.')
+    except Exception as e:
+        st.error(f'❌ Error en Bloque 1: {e}')
+
+# --- Bloque 2: Integración de Datos Adicionales ---
+st.header('Bloque 2: Integración de Datos Adicionales')
+
+if 'df_bloque_2' in st.session_state:
+    uploaded_file_valorizacion = st.file_uploader(
+        '🚀 Paso 2: Sube el archivo Base de datos_valorizacion.xlsx',
+        type=['xlsx'],
+        key='valorizacion_file'
+    )
+
+    if uploaded_file_valorizacion is not None:
+        try:
+            xls = pd.ExcelFile(uploaded_file_valorizacion)
+            sheet_names = xls.sheet_names
+
+            nombre_ho_evweb = next((s for s in sheet_names if 'evweb' in s.lower()), sheet_names[0])
+            df_evweb = pd.read_excel(xls, sheet_name=nombre_ho_evweb)
+            
+            # Normalizar CUIT en la base
+            if 'CUIT' in df_evweb.columns:
+                df_evweb['CUIT'] = df_evweb['CUIT'].astype(str).str.split('.').str[0]
+
+            df_merged = st.session_state['df_bloque_2'].merge(df_evweb, left_on='efector_cuit', right_on='CUIT', how='left')
+
+            df_merged['cuenta_matricula'] = df_merged.get('Matricula')
+            df_merged['especialidad_medica'] = df_merged.get('Especialidad')
+
+            # Lógica de prioridad de categoría exacta del cuaderno funcional
+            if 'Arancel' in df_merged.columns:
+                df_merged['categoria'] = df_merged['Arancel']
+            elif 'Categoria' in df_merged.columns:
+                df_merged['categoria'] = df_merged['Categoria']
+            elif 'Matricula Arancel' in df_merged.columns:
+                df_merged['categoria'] = df_merged['Matricula Arancel']
+            else:
+                df_merged['categoria'] = df_merged.get('Matricula')
+            
+            # Limpiar categoría inmediatamente para asegurar matches
+            df_merged['categoria'] = df_merged['categoria'].astype(str).str.split('.').str[0].str.strip().str.upper()
+
+            df_merged['IVA_Template'] = df_merged.apply(lambda r: '0' if (str(r.get('Responsabilidad Fiscal')) in ['Monotributo', 'Exento'] or r.get('condición_iva') == 'Exento') else '1', axis=1)
+            df_merged['Tipo_OS'] = df_merged.apply(lambda r: '11062' if r.get('Responsabilidad Fiscal') == 'Responsable Inscripto' else '11060', axis=1)
+
+            cols_finales = st.session_state['df_bloque_2'].columns.tolist() + ['cuenta_matricula', 'especialidad_medica', 'categoria', 'IVA_Template', 'Tipo_OS']
+            st.session_state['df_final'] = df_merged[cols_finales].copy()
+            st.session_state['xls_valorizacion_raw'] = uploaded_file_valorizacion
+
+            st.success('✅ Paso 2 completado: Datos integrados.')
+        except Exception as e:
+            st.error(f'❌ Error en Bloque 2: {e}')
+
+# --- Bloque 3: Valorización ---
+st.header('Bloque 3: Valorización')
+
+if 'df_final' in st.session_state:
+    if st.button('🚀 Ejecutar Valorización Definitiva'):
+        try:
+            df_f = st.session_state['df_final'].copy()
+            df_f = df_f.drop_duplicates(subset=['transacción_item'], keep='first')
+
+            xls_v = pd.ExcelFile(st.session_state['xls_valorizacion_raw'])
+            df_nom = pd.read_excel(xls_v, sheet_name='Nomenclador')
+            df_uni = pd.read_excel(xls_v, sheet_name='unidades')
+            df_fijos = pd.read_excel(xls_v, sheet_name='Valor Fijos')
+
+            def limpiar(x):
+                if pd.isna(x): return ''
+                return str(x).split('.')[0].strip().upper()
+
+            df_f['prest_limpia'] = df_f['prestación'].apply(limpiar)
+            df_f['cat_limpia'] = df_f['categoria'].apply(limpiar)
+            df_nom['cod_limpio'] = df_nom['Código'].apply(limpiar)
+            df_fijos['cod_limpio'] = df_fijos['Cod'].apply(limpiar)
+            df_fijos['cat_limpia'] = df_fijos['Arancel'].apply(limpiar)
+
+            df_f['periodo_aux'] = pd.to_datetime(df_f['fecha_transaccion'], dayfirst=True, errors='coerce').dt.to_period('M')
+            df_uni['periodo_aux'] = pd.to_datetime(df_uni['Mes'], errors='coerce').dt.to_period('M')
+            df_fijos['periodo_aux'] = pd.to_datetime(df_fijos['Periodo'], errors='coerce').dt.to_period('M')
+
+            # --- REGLA 1 ---
+            df_calc_uni = pd.merge(df_nom, df_uni, left_on=['Tipo de nomenclador'], right_on=['Tipo de Nomenclador'], how='inner')
+            df_calc_uni['IMPORTE_R1'] = pd.to_numeric(df_calc_uni['Cirujano'], errors='coerce') * pd.to_numeric(df_calc_uni['Valor'], errors='coerce')
+            df_calc_uni = df_calc_uni.drop_duplicates(subset=['cod_limpio', 'periodo_aux'])
+
+            df_f = pd.merge(df_f, df_calc_uni[['cod_limpio', 'periodo_aux', 'IMPORTE_R1']],
+                            left_on=['prest_limpia', 'periodo_aux'], right_on=['cod_limpio', 'periodo_aux'], how='left')
+
+            # --- REGLA 2 ---
+            f_filt = df_fijos[df_fijos['Nomenclador'].astype(str).str.contains('SWISS MEDICAL', na=False, case=False)].copy()
+            f_2a = f_filt.drop_duplicates(subset=['cod_limpio', 'cat_limpia', 'periodo_aux'])
+            df_f = pd.merge(df_f, f_2a[['cod_limpio', 'cat_limpia', 'periodo_aux', 'Total prestación']],
+                            left_on=['prest_limpia', 'cat_limpia', 'periodo_aux'], right_on=['cod_limpio', 'cat_limpia', 'periodo_aux'],
+                            how='left')
+
+            f_2b = f_filt.drop_duplicates(subset=['cod_limpio', 'periodo_aux'])
+            df_f = pd.merge(df_f, f_2b[['cod_limpio', 'periodo_aux', 'Total prestación']],
+                            left_on=['prest_limpia', 'periodo_aux'], right_on=['cod_limpio', 'periodo_aux'],
+                            how='left', suffixes=('', '_R2B'))
+
+            # --- REGLA 3 ---
+            f_3 = df_fijos.drop_duplicates(subset=['cod_limpio', 'cat_limpia', 'periodo_aux'])
+            df_f = pd.merge(df_f, f_3[['cod_limpio', 'cat_limpia', 'periodo_aux', 'Total prestación']],
+                            left_on=['prest_limpia', 'cat_limpia', 'periodo_aux'],
+                            right_on=['cod_limpio', 'cat_limpia', 'periodo_aux'],
+                            how='left', suffixes=('', '_R3'))
+
+            def consolidar(row):
+                if pd.notna(row['IMPORTE_R1']): return row['IMPORTE_R1']
+                if pd.notna(row['Total prestación']): return row['Total prestación']
+                if pd.notna(row['Total prestación_R2B']): return row['Total prestación_R2B']
+                if pd.notna(row['Total prestación_R3']): return row['Total prestación_R3']
+                return '#REVISAR VALORES'
+
+            df_f['IMPORTE'] = df_f.apply(consolidar, axis=1)
+            df_f['Total'] = df_f.apply(lambda r: float(r['IMPORTE']) * float(r['cantidad']) if str(r['IMPORTE']) != '#REVISAR VALORES' else r['IMPORTE'], axis=1)
+
+            df_f = df_f.drop_duplicates(subset=['transacción_item'], keep='first')
+            prohibidas = ['_limpia', 'periodo_aux', 'cod_limpio', 'cat_limpia', 'IMPORTE_R1', 'Total prestación', 'Tipo de Nomenclador', 'Tipo de nomenclador', 'Código']
+            cols_a_borrar = [c for c in df_f.columns if any(p in c for p in prohibidas) and c not in ['IMPORTE', 'Total']]
+            df_final_res = df_f.drop(columns=cols_a_borrar, errors='ignore')
+
+            revisar_count = (df_final_res['IMPORTE'] == '#REVISAR VALORES').sum()
+            if revisar_count > 0:
+                st.warning(f'🔍 Atención: Se encontraron {revisar_count} registros que requieren revisión manual (#REVISAR VALORES).')
+            else:
+                st.success(f'✅ Valorización completada al 100%. {len(df_final_res)} registros procesados.')
+
+            output = io.BytesIO()
+            with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                df_final_res.to_excel(writer, index=False)
+            st.download_button('Descargar reporte_valorizado_final.xlsx', output.getvalue(), 'reporte_valorizado_final.xlsx', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+
+        except Exception as e:
+            st.error(f'❌ Error en Valorización: {e}')
