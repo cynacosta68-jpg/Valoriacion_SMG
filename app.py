@@ -57,15 +57,14 @@ if 'df_bloque_2' in st.session_state:
             sheet_names = xls.sheet_names
 
             # Cargar Base Evweb
-            nombre_hoja_evweb = next((s for s in sheet_names if 'evweb' in s.lower()), sheet_names[0])
-            df_evweb = pd.read_excel(xls, sheet_name=nombre_hoja_evweb)
+            nombre_ho_evweb = next((s for s in sheet_names if 'evweb' in s.lower()), sheet_names[0])
+            df_evweb = pd.read_excel(xls, sheet_name=nombre_ho_evweb)
 
             df_merged = st.session_state['df_bloque_2'].merge(df_evweb, left_on='efector_cuit', right_on='CUIT', how='left')
 
             df_merged['cuenta_matricula'] = df_merged.get('Matricula')
             df_merged['especialidad_medica'] = df_merged.get('Especialidad')
 
-            # Lógica Categoría
             if 'Categoria' in df_merged.columns: df_merged['categoria'] = df_merged['Categoria']
             elif 'Arancel' in df_merged.columns: df_merged['categoria'] = df_merged['Arancel']
             else: df_merged['categoria'] = df_merged.get('Matricula')
@@ -90,7 +89,6 @@ if 'df_final' in st.session_state:
             # 1. CARGA DESDE SESSION STATE
             df_f = st.session_state['df_final'].copy()
             
-            # Limpieza de duplicados inicial (como el código original)
             conteo_inicial = len(df_f)
             df_f = df_f.drop_duplicates(subset=['transacción_item'], keep='first')
             st.write(f"🔹 Registros originales: {conteo_inicial} -> Después de limpiar duplicados: {len(df_f)}")
@@ -117,7 +115,10 @@ if 'df_final' in st.session_state:
             df_calc_uni = pd.merge(df_nom, df_uni, left_on=['Tipo de nomenclador'], right_on=['Tipo de Nomenclador'], how='inner')
             df_calc_uni['IMPORTE_R1'] = pd.to_numeric(df_calc_uni['Cirujano'], errors='coerce') * pd.to_numeric(df_calc_uni['Valor'], errors='coerce')
             df_calc_uni = df_calc_uni.drop_duplicates(subset=['cod_limpio', 'periodo_aux'])
-            df_f = pd.merge(df_f, df_calc_uni[['cod_limpio', 'periodo_aux', 'IMPORTE_R1']], on=['cod_limpio', 'periodo_aux'], how='left')
+            
+            # FIX: Usar left_on y right_on para evitar KeyError
+            df_f = pd.merge(df_f, df_calc_uni[['cod_limpio', 'periodo_aux', 'IMPORTE_R1']], 
+                            left_on=['prest_limpia', 'periodo_aux'], right_on=['cod_limpio', 'periodo_aux'], how='left')
 
             # --- REGLA 2: VALOR FIJOS (SWISS MEDICAL) ---
             f_filt = df_fijos[df_fijos['Nomenclador'].astype(str).str.contains('SWISS MEDICAL', na=False, case=False)].copy()
@@ -150,7 +151,6 @@ if 'df_final' in st.session_state:
 
             df_f['IMPORTE'] = df_f.apply(consolidar, axis=1)
             
-            # --- TOTAL ---
             def calcular_total(row):
                 try:
                     return float(row['IMPORTE']) * float(row['cantidad'])
@@ -158,7 +158,6 @@ if 'df_final' in st.session_state:
 
             df_f['Total'] = df_f.apply(calcular_total, axis=1)
 
-            # Limpieza final de columnas auxiliares
             df_f = df_f.drop_duplicates(subset=['transacción_item'], keep='first')
             prohibidas = ['_limpia', 'periodo_aux', 'cod_limpio', 'cat_limpia', 'IMPORTE_R1', 'Total prestación', 'Tipo de Nomenclador', 'Tipo de nomenclador', 'Código']
             cols_a_borrar = [c for c in df_f.columns if any(p in c for p in prohibidas) and c not in ['IMPORTE', 'Total']]
