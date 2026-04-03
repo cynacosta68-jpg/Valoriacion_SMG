@@ -107,7 +107,7 @@ if 'df_final' in st.session_state:
             df_uni['periodo_aux'] = pd.to_datetime(df_uni['Mes'], errors='coerce').dt.to_period('M')
             df_fijos['periodo_aux'] = pd.to_datetime(df_fijos['Periodo'], errors='coerce').dt.to_period('M')
 
-            # REGLA 1: Nomenclador + Unidades
+            # --- REGLA 1: NOMENCLADOR + UNIDADES ---
             df_calc_uni = pd.merge(df_nom, df_uni, left_on=['Tipo de nomenclador'], right_on=['Tipo de Nomenclador'], how='inner')
             df_calc_uni['IMPORTE_R1'] = pd.to_numeric(df_calc_uni['Cirujano'], errors='coerce') * pd.to_numeric(df_calc_uni['Valor'], errors='coerce')
             df_calc_uni = df_calc_uni.drop_duplicates(subset=['cod_limpio', 'periodo_aux'])
@@ -115,18 +115,22 @@ if 'df_final' in st.session_state:
             df_f = pd.merge(df_f, df_calc_uni[['cod_limpio', 'periodo_aux', 'IMPORTE_R1']],
                             left_on=['prest_limpia', 'periodo_aux'], right_on=['cod_limpio', 'periodo_aux'], how='left')
 
-            # REGLA 2: Valor Fijos (SWISS)
+            # --- REGLA 2: VALOR FIJOS (SWISS MEDICAL) ---
             f_filt = df_fijos[df_fijos['Nomenclador'].astype(str).str.contains('SWISS MEDICAL', na=False, case=False)].copy()
+            
+            # 2A: Con Categoría
             f_2a = f_filt.drop_duplicates(subset=['cod_limpio', 'cat_limpia', 'periodo_aux'])
             df_f = pd.merge(df_f, f_2a[['cod_limpio', 'cat_limpia', 'periodo_aux', 'Total prestación']],
                             left_on=['prest_limpia', 'cat_limpia', 'periodo_aux'], right_on=['cod_limpio', 'cat_limpia', 'periodo_aux'],
-                            how='left', suffixes=('', '_R2A'))
+                            how='left')
+
+            # 2B: Sin Categoría
             f_2b = f_filt.drop_duplicates(subset=['cod_limpio', 'periodo_aux'])
             df_f = pd.merge(df_f, f_2b[['cod_limpio', 'periodo_aux', 'Total prestación']],
                             left_on=['prest_limpia', 'periodo_aux'], right_on=['cod_limpio', 'periodo_aux'],
                             how='left', suffixes=('', '_R2B'))
 
-            # REGLA 3: Valor Fijos (General)
+            # --- REGLA 3: VALOR FIJOS (SIN FILTROS) ---
             f_3 = df_fijos.drop_duplicates(subset=['cod_limpio', 'cat_limpia', 'periodo_aux'])
             df_f = pd.merge(df_f, f_3[['cod_limpio', 'cat_limpia', 'periodo_aux', 'Total prestación']],
                             left_on=['prest_limpia', 'cat_limpia', 'periodo_aux'],
@@ -143,12 +147,14 @@ if 'df_final' in st.session_state:
             df_f['IMPORTE'] = df_f.apply(consolidar, axis=1)
 
             def calcular_total(row):
-                try: return float(row['IMPORTE']) * float(row['cantidad'])
-                except: return row['IMPORTE']
+                try:
+                    return float(row['IMPORTE']) * float(row['cantidad'])
+                except:
+                    return row['IMPORTE']
 
             df_f['Total'] = df_f.apply(calcular_total, axis=1)
-            
-            # Limpieza de duplicados de merge y columnas innecesarias
+
+            # Limpieza final
             df_f = df_f.drop_duplicates(subset=['transacción_item'], keep='first')
             prohibidas = ['_limpia', 'periodo_aux', 'cod_limpio', 'cat_limpia', 'IMPORTE_R1', 'Total prestación', 'Tipo de Nomenclador', 'Tipo de nomenclador', 'Código']
             cols_a_borrar = [c for c in df_f.columns if any(p in c for p in prohibidas) and c not in ['IMPORTE', 'Total']]
