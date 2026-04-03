@@ -48,12 +48,12 @@ def ejecutar_proceso_total(df_subido, db_valor):
         # ---------------------------------------------------------
         # PASO 2: UNIÓN CON EVWEB (El bloque que compartiste)
         # ---------------------------------------------------------
-        # Asumimos que 'evweb' es una pestaña del Excel de valorización
-        if 'evweb' not in db_valor:
-            st.error("❌ El Excel de base de datos debe tener una pestaña llamada 'evweb' con la info de prestadores.")
+        # Asumimos que 'Base evweb' es una pestaña del Excel de valorización
+        if 'Base evweb' not in db_valor:
+            st.error("❌ El Excel de base de datos debe tener una pestaña llamada 'Base evweb' con la info de prestadores.")
             return None
         
-        df_evweb = db_valor['evweb'].copy()
+        df_evweb = db_valor['Base evweb'].copy()
         
         # Merge por CUIT
         df_merged = df_bloque_2.merge(df_evweb, left_on='efector_cuit', right_on='CUIT', how='left')
