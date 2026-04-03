@@ -93,8 +93,10 @@ if 'df_final' in st.session_state:
             df_uni = pd.read_excel(xls_v, sheet_name='unidades')
             df_fijos = pd.read_excel(xls_v, sheet_name='Valor Fijos')
 
-            def limpiar(x): return str(x).split('.')[0].strip().upper() if pd.notna(x) else ''
-            
+            def limpiar(x):
+                if pd.isna(x): return ''
+                return str(x).split('.')[0].strip().upper()
+
             df_f['prest_limpia'] = df_f['prestación'].apply(limpiar)
             df_f['cat_limpia'] = df_f['categoria'].apply(limpiar)
             df_nom['cod_limpio'] = df_nom['Código'].apply(limpiar)
@@ -105,6 +107,7 @@ if 'df_final' in st.session_state:
             df_uni['periodo_aux'] = pd.to_datetime(df_uni['Mes'], errors='coerce').dt.to_period('M')
             df_fijos['periodo_aux'] = pd.to_datetime(df_fijos['Periodo'], errors='coerce').dt.to_period('M')
 
+            # REGLA 1: Nomenclador + Unidades
             df_calc_uni = pd.merge(df_nom, df_uni, left_on=['Tipo de nomenclador'], right_on=['Tipo de Nomenclador'], how='inner')
             df_calc_uni['IMPORTE_R1'] = pd.to_numeric(df_calc_uni['Cirujano'], errors='coerce') * pd.to_numeric(df_calc_uni['Valor'], errors='coerce')
             df_calc_uni = df_calc_uni.drop_duplicates(subset=['cod_limpio', 'periodo_aux'])
@@ -112,18 +115,18 @@ if 'df_final' in st.session_state:
             df_f = pd.merge(df_f, df_calc_uni[['cod_limpio', 'periodo_aux', 'IMPORTE_R1']],
                             left_on=['prest_limpia', 'periodo_aux'], right_on=['cod_limpio', 'periodo_aux'], how='left')
 
+            # REGLA 2: Valor Fijos (SWISS)
             f_filt = df_fijos[df_fijos['Nomenclador'].astype(str).str.contains('SWISS MEDICAL', na=False, case=False)].copy()
-            
             f_2a = f_filt.drop_duplicates(subset=['cod_limpio', 'cat_limpia', 'periodo_aux'])
             df_f = pd.merge(df_f, f_2a[['cod_limpio', 'cat_limpia', 'periodo_aux', 'Total prestación']],
                             left_on=['prest_limpia', 'cat_limpia', 'periodo_aux'], right_on=['cod_limpio', 'cat_limpia', 'periodo_aux'],
                             how='left', suffixes=('', '_R2A'))
-
             f_2b = f_filt.drop_duplicates(subset=['cod_limpio', 'periodo_aux'])
             df_f = pd.merge(df_f, f_2b[['cod_limpio', 'periodo_aux', 'Total prestación']],
                             left_on=['prest_limpia', 'periodo_aux'], right_on=['cod_limpio', 'periodo_aux'],
                             how='left', suffixes=('', '_R2B'))
 
+            # REGLA 3: Valor Fijos (General)
             f_3 = df_fijos.drop_duplicates(subset=['cod_limpio', 'cat_limpia', 'periodo_aux'])
             df_f = pd.merge(df_f, f_3[['cod_limpio', 'cat_limpia', 'periodo_aux', 'Total prestación']],
                             left_on=['prest_limpia', 'cat_limpia', 'periodo_aux'],
@@ -136,15 +139,16 @@ if 'df_final' in st.session_state:
                 if pd.notna(row['Total prestación_R2B']): return row['Total prestación_R2B']
                 if pd.notna(row['Total prestación_R3']): return row['Total prestación_R3']
                 return '#REVISAR VALORES'
-            
+
             df_f['IMPORTE'] = df_f.apply(consolidar, axis=1)
 
             def calcular_total(row):
                 try: return float(row['IMPORTE']) * float(row['cantidad'])
                 except: return row['IMPORTE']
-            
-            df_f['Total'] = df_f.apply(calcular_total, axis=1)
 
+            df_f['Total'] = df_f.apply(calcular_total, axis=1)
+            
+            # Limpieza de duplicados de merge y columnas innecesarias
             df_f = df_f.drop_duplicates(subset=['transacción_item'], keep='first')
             prohibidas = ['_limpia', 'periodo_aux', 'cod_limpio', 'cat_limpia', 'IMPORTE_R1', 'Total prestación', 'Tipo de Nomenclador', 'Tipo de nomenclador', 'Código']
             cols_a_borrar = [c for c in df_f.columns if any(p in c for p in prohibidas) and c not in ['IMPORTE', 'Total']]
@@ -155,11 +159,11 @@ if 'df_final' in st.session_state:
                 st.warning(f'🔍 Atención: Se encontraron {revisar_count} registros que requieren revisión manual (#REVISAR VALORES).')
             else:
                 st.success(f'✅ Valorización completada al 100%. {len(df_final_res)} registros procesados.')
-            
+
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
                 df_final_res.to_excel(writer, index=False)
             st.download_button('Descargar reporte_valorizado_final.xlsx', output.getvalue(), 'reporte_valorizado_final.xlsx', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
-            
+
         except Exception as e:
             st.error(f'❌ Error en Valorización: {e}')
