@@ -1,85 +1,3 @@
-import streamlit as st
-import pandas as pd
-import io
-
-st.set_page_config(layout="wide")
-st.title("Aplicación de Procesamiento y Valorización de Reportes")
-
-# --- Bloque 1: Limpieza del Reporte de Liquidación ---
-st.header("Bloque 1: Limpieza del Reporte de Liquidación")
-
-uploaded_file_liquidacion = st.file_uploader(
-    "🚀 Paso 1: Sube el archivo 'Reporte de Liquidacion 1'",
-    type=['csv', 'xlsx'],
-    key="liquidacion_file"
-)
-
-if uploaded_file_liquidacion is not None:
-    try:
-        file_name = uploaded_file_liquidacion.name
-        if file_name.endswith('.csv'):
-            try:
-                df = pd.read_csv(uploaded_file_liquidacion, encoding='latin1', sep=';')
-            except:
-                uploaded_file_liquidacion.seek(0)
-                df = pd.read_csv(uploaded_file_liquidacion, encoding='latin1', sep=',')
-        else:
-            df = pd.read_excel(uploaded_file_liquidacion)
-
-        columnas_a_borrar = [
-            'prestador', 'Razón_Social', 'cuit', 'transacción_ticket',
-            'fecha_prestacion', 'transacción_tipo', 'autorización',
-            'efector', 'efector_matricula', 'prescriptor',
-            'prescriptor_matricula', 'prescriptor_razón_social',
-            'icd', 'terminal', 'terminal_domicilio'
-        ]
-        columnas_presentes = [col for col in columnas_a_borrar if col in df.columns]
-        df_limpio = df.drop(columns=columnas_presentes, errors='ignore').dropna(how='all')
-        
-        st.session_state['df_bloque_2'] = df_limpio
-        st.success("✅ Paso 1 completado: Reporte de liquidación procesado.")
-    except Exception as e:
-        st.error(f"❌ Error en Bloque 1: {e}")
-
-# --- Bloque 2: Integración de Datos Adicionales ---
-st.header("Bloque 2: Integración de Datos Adicionales")
-
-if 'df_bloque_2' in st.session_state:
-    uploaded_file_valorizacion = st.file_uploader(
-        "🚀 Paso 2: Sube el archivo 'Base de datos_valorizacion.xlsx'",
-        type=['xlsx'],
-        key="valorizacion_file"
-    )
-
-    if uploaded_file_valorizacion is not None:
-        try:
-            xls = pd.ExcelFile(uploaded_file_valorizacion)
-            sheet_names = xls.sheet_names
-
-            # Cargar Base Evweb
-            nombre_ho_evweb = next((s for s in sheet_names if 'evweb' in s.lower()), sheet_names[0])
-            df_evweb = pd.read_excel(xls, sheet_name=nombre_ho_evweb)
-
-            df_merged = st.session_state['df_bloque_2'].merge(df_evweb, left_on='efector_cuit', right_on='CUIT', how='left')
-
-            df_merged['cuenta_matricula'] = df_merged.get('Matricula')
-            df_merged['especialidad_medica'] = df_merged.get('Especialidad')
-
-            if 'Categoria' in df_merged.columns: df_merged['categoria'] = df_merged['Categoria']
-            elif 'Arancel' in df_merged.columns: df_merged['categoria'] = df_merged['Arancel']
-            else: df_merged['categoria'] = df_merged.get('Matricula')
-
-            df_merged['IVA_Template'] = df_merged.apply(lambda r: '0' if (str(r.get('Responsabilidad Fiscal')) in ['Monotributo', 'Exento'] or r.get('condición_iva') == 'Exento') else '1', axis=1)
-            df_merged['Tipo_OS'] = df_merged.apply(lambda r: '11062' if r.get('Responsabilidad Fiscal') == 'Responsable Inscripto' else '11060', axis=1)
-
-            cols_finales = st.session_state['df_bloque_2'].columns.tolist() + ['cuenta_matricula', 'especialidad_medica', 'categoria', 'IVA_Template', 'Tipo_OS']
-            st.session_state['df_final'] = df_merged[cols_finales].copy()
-            st.session_state['xls_valorizacion'] = uploaded_file_valorizacion
-
-            st.success("✅ Paso 2 completado: Datos integrados.")
-        except Exception as e:
-            st.error(f"❌ Error en Bloque 2: {e}")
-
 # --- Bloque 3: Valorización ---
 st.header("Bloque 3: Valorización")
 
@@ -89,16 +7,15 @@ if 'df_final' in st.session_state:
             # 1. CARGA DESDE SESSION STATE
             df_f = st.session_state['df_final'].copy()
             
-            conteo_inicial = len(df_f)
+            # Limpieza inicial de duplicados para asegurar integridad
             df_f = df_f.drop_duplicates(subset=['transacción_item'], keep='first')
-            st.write(f"🔹 Registros originales: {conteo_inicial} -> Después de limpiar duplicados: {len(df_f)}")
 
             xls_v = pd.ExcelFile(st.session_state['xls_valorizacion'])
             df_nom = pd.read_excel(xls_v, sheet_name='Nomenclador')
             df_uni = pd.read_excel(xls_v, sheet_name='unidades')
             df_fijos = pd.read_excel(xls_v, sheet_name='Valor Fijos')
 
-            # 2. NORMALIZACIÓN
+            # 2. NORMALIZACIÓN DE CLAVES (Igual que en Colab)
             def limpiar(x): return str(x).split('.')[0].strip().upper() if pd.notna(x) else ""
 
             df_f['prest_limpia'] = df_f['prestación'].apply(limpiar)
@@ -107,6 +24,7 @@ if 'df_final' in st.session_state:
             df_fijos['cod_limpio'] = df_fijos['Cod'].apply(limpiar)
             df_fijos['cat_limpia'] = df_fijos['Arancel'].apply(limpiar)
 
+            # Normalización de fechas a periodos Mensuales
             df_f['periodo_aux'] = pd.to_datetime(df_f['fecha_transaccion'], dayfirst=True, errors='coerce').dt.to_period('M')
             df_uni['periodo_aux'] = pd.to_datetime(df_uni['Mes'], errors='coerce').dt.to_period('M')
             df_fijos['periodo_aux'] = pd.to_datetime(df_fijos['Periodo'], errors='coerce').dt.to_period('M')
@@ -116,59 +34,82 @@ if 'df_final' in st.session_state:
             df_calc_uni['IMPORTE_R1'] = pd.to_numeric(df_calc_uni['Cirujano'], errors='coerce') * pd.to_numeric(df_calc_uni['Valor'], errors='coerce')
             df_calc_uni = df_calc_uni.drop_duplicates(subset=['cod_limpio', 'periodo_aux'])
             
-            # FIX: Usar left_on y right_on para evitar KeyError
             df_f = pd.merge(df_f, df_calc_uni[['cod_limpio', 'periodo_aux', 'IMPORTE_R1']], 
                             left_on=['prest_limpia', 'periodo_aux'], right_on=['cod_limpio', 'periodo_aux'], how='left')
 
-            # --- REGLA 2: VALOR FIJOS (SWISS MEDICAL) ---
+            # --- REGLA 2: VALOR FIJOS (FILTRO SWISS MEDICAL) ---
             f_filt = df_fijos[df_fijos['Nomenclador'].astype(str).str.contains('SWISS MEDICAL', na=False, case=False)].copy()
             
-            # 2A: Con Categoría
+            # 2A: Match Código + Categoría + Periodo
             f_2a = f_filt.drop_duplicates(subset=['cod_limpio', 'cat_limpia', 'periodo_aux'])
             df_f = pd.merge(df_f, f_2a[['cod_limpio', 'cat_limpia', 'periodo_aux', 'Total prestación']], 
                             left_on=['prest_limpia', 'cat_limpia', 'periodo_aux'], right_on=['cod_limpio', 'cat_limpia', 'periodo_aux'], 
-                            how='left', suffixes=('', '_R2A'))
+                            how='left')
 
-            # 2B: Sin Categoría
+            # 2B: Match Código + Periodo (Sin Categoría)
             f_2b = f_filt.drop_duplicates(subset=['cod_limpio', 'periodo_aux'])
             df_f = pd.merge(df_f, f_2b[['cod_limpio', 'periodo_aux', 'Total prestación']], 
                             left_on=['prest_limpia', 'periodo_aux'], right_on=['cod_limpio', 'periodo_aux'], 
                             how='left', suffixes=('', '_R2B'))
 
-            # --- REGLA 3: VALOR FIJOS (SIN FILTROS) ---
+            # --- REGLA 3: VALOR FIJOS (TODOS LOS REGISTROS) ---
             f_3 = df_fijos.drop_duplicates(subset=['cod_limpio', 'cat_limpia', 'periodo_aux'])
             df_f = pd.merge(df_f, f_3[['cod_limpio', 'cat_limpia', 'periodo_aux', 'Total prestación']], 
                             left_on=['prest_limpia', 'cat_limpia', 'periodo_aux'], right_on=['cod_limpio', 'cat_limpia', 'periodo_aux'], 
                             how='left', suffixes=('', '_R3'))
 
-            # --- CONSOLIDACIÓN ---
-            def consolidar(row):
-                if pd.notna(row.get('IMPORTE_R1')): return row['IMPORTE_R1']
-                if pd.notna(row.get('Total prestación')): return row['Total prestación']
-                if pd.notna(row.get('Total prestación_R2B')): return row['Total prestación_R2B']
-                if pd.notna(row.get('Total prestación_R3')): return row['Total prestación_R3']
+            # --- PASO CRUCIAL: CONSOLIDACIÓN DE IMPORTE (Lógica Colab) ---
+            def consolidar_importe(row):
+                # 1. Prioridad: Regla 1 (Nomenclador)
+                if pd.notna(row.get('IMPORTE_R1')):
+                    return row['IMPORTE_R1']
+                
+                # 2. Prioridad: Regla 2A (Swiss Medical con Categoría)
+                if pd.notna(row.get('Total prestación')):
+                    return row['Total prestación']
+                
+                # 3. Prioridad: Regla 2B (Swiss Medical sin Categoría)
+                if pd.notna(row.get('Total prestación_R2B')):
+                    return row['Total prestación_R2B']
+                
+                # 4. Prioridad: Regla 3 (Cualquier valor fijo restante)
+                if pd.notna(row.get('Total prestación_R3')):
+                    return row['Total prestación_R3']
+                
                 return "#REVISAR VALORES"
 
-            df_f['IMPORTE'] = df_f.apply(consolidar, axis=1)
+            df_f['IMPORTE'] = df_f.apply(consolidar_importe, axis=1)
             
+            # Cálculo de Total Final
             def calcular_total(row):
                 try:
-                    return float(row['IMPORTE']) * float(row['cantidad'])
+                    val_imp = row['IMPORTE']
+                    if val_imp == "#REVISAR VALORES": return "#REVISAR VALORES"
+                    return float(val_imp) * float(row['cantidad'])
                 except: return row['IMPORTE']
 
             df_f['Total'] = df_f.apply(calcular_total, axis=1)
 
+            # Limpieza de columnas auxiliares para el archivo final
             df_f = df_f.drop_duplicates(subset=['transacción_item'], keep='first')
             prohibidas = ['_limpia', 'periodo_aux', 'cod_limpio', 'cat_limpia', 'IMPORTE_R1', 'Total prestación', 'Tipo de Nomenclador', 'Tipo de nomenclador', 'Código']
             cols_a_borrar = [c for c in df_f.columns if any(p in c for p in prohibidas) and c not in ['IMPORTE', 'Total']]
             df_final_res = df_f.drop(columns=cols_a_borrar, errors='ignore')
 
-            st.success(f"✅ Valorización completada. {len(df_final_res)} registros finales.")
+            st.success(f"✅ Valorización completada exitosamente.")
+            st.dataframe(df_final_res.head(50))
             
+            # Preparación de descarga
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
                 df_final_res.to_excel(writer, index=False)
-            st.download_button("Descargar Reporte FINAL", output.getvalue(), "reporte_FINAL_VALORIZADO.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            
+            st.download_button(
+                label="📥 Descargar Reporte FINAL VALORIZADO",
+                data=output.getvalue(),
+                file_name="reporte_FINAL_VALORIZADO.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
             
         except Exception as e:
             st.error(f"❌ Error en Valorización: {e}")
