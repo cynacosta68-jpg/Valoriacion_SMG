@@ -133,6 +133,7 @@ if 'df_final' in st.session_state:
 
             # ===================================================================
             # REGLA ESPECIAL (R_ESP): Reglas por especialidad / código específico
+            # Prioridad: códigos SMG > 42010100 por especialidad > DIAGNOSTICO POR IMAGENES
             # ===================================================================
             DESC_CLINICA = "SMG MED Consulta clinica medica"
             DESC_MEDICO  = "SMG MED Consulta medica"
@@ -142,22 +143,28 @@ if 'df_final' in st.session_state:
                 'CLINICA MEDICA', 'CARDIOLOGIA', 'CIRUGIA GENERAL', 'GASTROENTEROLOGIA'
             ]
 
+            CODIGOS_SMG = ['12100401', '220101', '18010303']
+
             def calcular_r_esp(row):
                 cod = row['prest_limpia']
                 esp = row['esp_norm']
                 periodo = row['periodo_aux']
                 arancel = row['cat_limpia']
 
-                if esp == 'DIAGNOSTICO POR IMAGENES':
+                # --- PRIORIDAD 1: Códigos SMG (12100401, 220101, 18010303) ---
+                # Descripción empieza con "SMG" + Arancel + periodo
+                if cod in CODIGOS_SMG:
                     m = df_fijos[
                         (df_fijos['cod_limpio'] == cod) &
                         (df_fijos['periodo_aux'] == periodo) &
-                        (df_fijos['Nomenclador'].isna())
+                        (df_fijos['cat_limpia'] == arancel) &
+                        (df_fijos['Descripción'].astype(str).str.startswith('SMG', na=False))
                     ]
                     if not m.empty:
                         return m['Total prestación'].iloc[0]
                     return pd.NA
 
+                # --- PRIORIDAD 2: Código 42010100 por especialidad ---
                 if cod == '42010100':
                     if esp in ESPECIALIDADES_CLINICA_42:
                         m = df_fijos[
@@ -193,12 +200,12 @@ if 'df_final' in st.session_state:
                             return m['Total prestación'].iloc[0]
                         return pd.NA
 
-                if cod == '12100401':
+                # --- PRIORIDAD 3: DIAGNOSTICO POR IMAGENES → SIEMPRE (cualquier código no cubierto arriba) ---
+                if esp == 'DIAGNOSTICO POR IMAGENES':
                     m = df_fijos[
-                        (df_fijos['cod_limpio'] == '12100401') &
+                        (df_fijos['cod_limpio'] == cod) &
                         (df_fijos['periodo_aux'] == periodo) &
-                        (df_fijos['cat_limpia'] == arancel) &
-                        (df_fijos['Descripción'].astype(str).str.startswith('SMG', na=False))
+                        (df_fijos['Nomenclador'].isna())
                     ]
                     if not m.empty:
                         return m['Total prestación'].iloc[0]
@@ -233,30 +240,13 @@ if 'df_final' in st.session_state:
             )
             df_f.loc[~mask_r0, 'IMPORTE_R0'] = pd.NA
 
-            # --- REGLA 1: NOMENCLADOR + UNIDADES (normal) ---
+            # --- REGLA 1: NOMENCLADOR + UNIDADES ---
             df_calc_uni = pd.merge(df_nom, df_uni, left_on=['Tipo de nomenclador'], right_on=['Tipo de Nomenclador'], how='inner')
             df_calc_uni['IMPORTE_R1'] = pd.to_numeric(df_calc_uni['Cirujano'], errors='coerce') * pd.to_numeric(df_calc_uni['Valor'], errors='coerce')
             df_calc_uni = df_calc_uni.drop_duplicates(subset=['cod_limpio', 'periodo_aux'])
 
             df_f = pd.merge(df_f, df_calc_uni[['cod_limpio', 'periodo_aux', 'IMPORTE_R1']],
                             left_on=['prest_limpia', 'periodo_aux'], right_on=['cod_limpio', 'periodo_aux'], how='left').drop(columns=['cod_limpio'], errors='ignore')
-
-            # --- REGLA 1-BIS: Códigos del NOMENCLADOR GINECOLOGICO + Arancel R → unidad "Variable s/certificados" ---
-            df_uni['_tn_norm'] = df_uni['Tipo de Nomenclador'].apply(sin_tilde)
-            df_uni_var = df_uni[df_uni['_tn_norm'] == 'VARIABLE S/CERTIFICADOS'].copy()
-            df_uni_var = df_uni_var.drop_duplicates(subset=['periodo_aux'], keep='first')
-            df_uni_var = df_uni_var.rename(columns={'Valor': 'Valor_VAR'})
-
-            df_nom['_tipo_norm'] = df_nom['Tipo de nomenclador'].apply(sin_tilde)
-            df_nom_unique = df_nom.drop_duplicates(subset=['cod_limpio'], keep='first')[['cod_limpio', 'Cirujano', '_tipo_norm']].rename(columns={'Cirujano': 'Cirujano_VAR', '_tipo_norm': 'TipoNom_VAR'})
-
-            df_f = pd.merge(df_f, df_uni_var[['periodo_aux', 'Valor_VAR']], on='periodo_aux', how='left')
-            df_f = pd.merge(df_f, df_nom_unique, left_on='prest_limpia', right_on='cod_limpio', how='left').drop(columns=['cod_limpio'], errors='ignore')
-
-            df_f['IMPORTE_R1_VAR'] = pd.to_numeric(df_f['Cirujano_VAR'], errors='coerce') * pd.to_numeric(df_f['Valor_VAR'], errors='coerce')
-
-            mask_gine_r = (df_f['TipoNom_VAR'] == 'NOMENCLADOR GINECOLOGICO') & (df_f['cat_limpia'] == 'R')
-            df_f.loc[~mask_gine_r, 'IMPORTE_R1_VAR'] = pd.NA
 
             # --- REGLA 2: VALOR FIJOS (SWISS MEDICAL) ---
             f_filt = df_fijos[df_fijos['Nomenclador'].astype(str).str.contains('SWISS MEDICAL', na=True, case=False)].copy()
@@ -278,11 +268,10 @@ if 'df_final' in st.session_state:
                             right_on=['cod_limpio', 'cat_limpia', 'periodo_aux'],
                             how='left', suffixes=('', '_R3'))
 
-            # --- CONSOLIDACIÓN (R_ESP > R0 > R1_VAR > R1 > R2A > R2B > R3) ---
+            # --- CONSOLIDACIÓN (R_ESP > R0 > R1 > R2A > R2B > R3) ---
             def consolidar(row):
                 if pd.notna(row.get('IMPORTE_R_ESP')): return row['IMPORTE_R_ESP']
                 if pd.notna(row.get('IMPORTE_R0')): return row['IMPORTE_R0']
-                if pd.notna(row.get('IMPORTE_R1_VAR')): return row['IMPORTE_R1_VAR']
                 if pd.notna(row['IMPORTE_R1']): return row['IMPORTE_R1']
                 if pd.notna(row['Total prestación']): return row['Total prestación']
                 if pd.notna(row['Total prestación_R2B']): return row['Total prestación_R2B']
@@ -298,9 +287,8 @@ if 'df_final' in st.session_state:
             df_f['Total'] = df_f.apply(calcular_total, axis=1)
 
             df_f = df_f.drop_duplicates(subset=['transacción_item'], keep='first')
-            prohibidas = ['_limpia', '_nom_norm', '_tn_norm', '_tipo_norm', 'esp_norm', 'periodo_aux', 'cod_limpio', 'cat_limpia',
-                          'IMPORTE_R_ESP', 'IMPORTE_R0', 'IMPORTE_R1', 'IMPORTE_R1_VAR',
-                          'Valor_VAR', 'Cirujano_VAR', 'TipoNom_VAR',
+            prohibidas = ['_limpia', '_nom_norm', 'esp_norm', 'periodo_aux', 'cod_limpio', 'cat_limpia',
+                          'IMPORTE_R_ESP', 'IMPORTE_R0', 'IMPORTE_R1',
                           'Total prestación', 'Tipo de Nomenclador', 'Tipo de nomenclador', 'Código']
             cols_a_borrar = [c for c in df_f.columns if any(p in c for p in prohibidas) and c not in ['IMPORTE', 'Total']]
             df_final_res = df_f.drop(columns=cols_a_borrar, errors='ignore')
