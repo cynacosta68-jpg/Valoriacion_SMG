@@ -29,7 +29,6 @@ if uploaded_file_liquidacion is not None:
         else:
             df = pd.read_excel(uploaded_file_liquidacion)
 
-        # 1. Definir columnas a eliminar (Exacto al Colab)
         columnas_a_borrar = [
             'prestador', 'Razón_Social', 'cuit', 'transacción_ticket',
             'fecha_prestacion', 'transacción_tipo', 'autorización',
@@ -40,7 +39,6 @@ if uploaded_file_liquidacion is not None:
         columnas_presentes = [col for col in columnas_a_borrar if col in df.columns]
         df_limpio = df.drop(columns=columnas_presentes, errors='ignore').dropna(how='all')
 
-        # NORMALIZACIÓN CRÍTICA DE CUIT
         if 'efector_cuit' in df_limpio.columns:
             df_limpio['efector_cuit'] = df_limpio['efector_cuit'].astype(str).str.split('.').str[0].str.strip()
 
@@ -125,9 +123,73 @@ if 'df_final' in st.session_state:
             df_uni['periodo_aux'] = pd.to_datetime(df_uni['Mes'], errors='coerce').dt.to_period('M')
             df_fijos['periodo_aux'] = pd.to_datetime(df_fijos['Periodo'], errors='coerce').dt.to_period('M')
 
+            # ===================================================================
+            # REGLA ESPECIAL (R_ESP): Código 42010100 según especialidad_medica
+            # Prioridad MÁXIMA — se calcula fila por fila
+            # ===================================================================
+            ESPECIALIDADES_CLINICA = [
+                'CLINICA MEDICA', 'CARDIOLOGIA', 'CIRUGIA GENERAL',
+                'GASTROENTEROLOGIA', 'MEDICO'
+            ]
+            DESC_CLINICA = "SMG MED Consulta clinica medica"
+            DESC_MEDGEN = "SMG MED consulta medica"
+
+            def calcular_r_esp(row):
+                if row['prest_limpia'] != '42010100':
+                    return pd.NA
+                esp = row['esp_limpia']
+                periodo = row['periodo_aux']
+                arancel = row['cat_limpia']
+
+                # DIAGNOSTICO POR IMAGENES → Nomenclador vacío, sin Arancel
+                if esp in ('DIAGNOSTICO POR IMAGENES', 'DIAGNOSTICO POR IMÁGENES'):
+                    m = df_fijos[
+                        (df_fijos['cod_limpio'] == '42010100') &
+                        (df_fijos['periodo_aux'] == periodo) &
+                        (df_fijos['Nomenclador'].isna())
+                    ]
+                    if not m.empty:
+                        return m['Total prestación'].iloc[0]
+                    return pd.NA
+
+                # CLINICA y similares → descripción exacta "SMG MED Consulta clinica medica" + Arancel
+                if esp in ESPECIALIDADES_CLINICA:
+                    m = df_fijos[
+                        (df_fijos['cod_limpio'] == '42010100') &
+                        (df_fijos['periodo_aux'] == periodo) &
+                        (df_fijos['Descripción'] == DESC_CLINICA) &
+                        (df_fijos['cat_limpia'] == arancel)
+                    ]
+                    if not m.empty:
+                        return m['Total prestación'].iloc[0]
+                    return pd.NA
+
+                # MEDICINA GENERAL Y/O FAMILIAR → descripción "SMG MED consulta medica", R se trata como C
+                if esp == 'MEDICINA GENERAL Y/O FAMILIAR':
+                    arancel_efectivo = 'C' if arancel == 'R' else arancel
+                    m = df_fijos[
+                        (df_fijos['cod_limpio'] == '42010100') &
+                        (df_fijos['periodo_aux'] == periodo) &
+                        (df_fijos['Descripción'] == DESC_MEDGEN) &
+                        (df_fijos['cat_limpia'] == arancel_efectivo)
+                    ]
+                    if not m.empty:
+                        return m['Total prestación'].iloc[0]
+                    return pd.NA
+
+                return pd.NA
+
+            df_f['IMPORTE_R_ESP'] = df_f.apply(calcular_r_esp, axis=1)
+
             # --- REGLA 0: NOMENCLADOR NACIONAL (OTORRINO / DERMATO, prestación que NO empieza con 4) ---
-            f_nn = df_fijos[df_fijos['Nomenclador'].astype(str).str.contains('NOMENCLADOR NACIONAL', na=False, case=False)].copy()
-            f_nn = f_nn.drop_duplicates(subset=['cod_limpio', 'periodo_aux'])
+            df_fijos['_nom_norm'] = (
+                df_fijos['Nomenclador'].astype(str)
+                .str.strip().str.upper()
+                .str.normalize('NFKD').str.encode('ascii', errors='ignore').str.decode('ascii')
+            )
+            f_nn = df_fijos[df_fijos['_nom_norm'].str.contains('NOMENCLADOR NACIONAL', na=False)].copy()
+            f_nn = f_nn[pd.to_numeric(f_nn['Total prestación'], errors='coerce').notna()]
+            f_nn = f_nn.drop_duplicates(subset=['cod_limpio', 'periodo_aux'], keep='first')
 
             df_f = pd.merge(
                 df_f,
@@ -172,8 +234,9 @@ if 'df_final' in st.session_state:
                             right_on=['cod_limpio', 'cat_limpia', 'periodo_aux'],
                             how='left', suffixes=('', '_R3'))
 
-            # --- CONSOLIDACIÓN (R0 tiene prioridad máxima) ---
+            # --- CONSOLIDACIÓN (R_ESP > R0 > R1 > R2A > R2B > R3) ---
             def consolidar(row):
+                if pd.notna(row.get('IMPORTE_R_ESP')): return row['IMPORTE_R_ESP']
                 if pd.notna(row.get('IMPORTE_R0')): return row['IMPORTE_R0']
                 if pd.notna(row['IMPORTE_R1']): return row['IMPORTE_R1']
                 if pd.notna(row['Total prestación']): return row['Total prestación']  # R2A
@@ -190,7 +253,7 @@ if 'df_final' in st.session_state:
             df_f['Total'] = df_f.apply(calcular_total, axis=1)
 
             df_f = df_f.drop_duplicates(subset=['transacción_item'], keep='first')
-            prohibidas = ['_limpia', 'periodo_aux', 'cod_limpio', 'cat_limpia', 'IMPORTE_R0', 'IMPORTE_R1', 'Total prestación', 'Tipo de Nomenclador', 'Tipo de nomenclador', 'Código']
+            prohibidas = ['_limpia', '_nom_norm', 'periodo_aux', 'cod_limpio', 'cat_limpia', 'IMPORTE_R_ESP', 'IMPORTE_R0', 'IMPORTE_R1', 'Total prestación', 'Tipo de Nomenclador', 'Tipo de nomenclador', 'Código']
             cols_a_borrar = [c for c in df_f.columns if any(p in c for p in prohibidas) and c not in ['IMPORTE', 'Total']]
             df_final_res = df_f.drop(columns=cols_a_borrar, errors='ignore')
 
