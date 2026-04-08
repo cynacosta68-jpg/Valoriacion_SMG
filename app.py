@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 import io
 
-# Configuración inicial de la página
 st.set_page_config(layout="wide", page_title="Valorizador SMG - Versión Colab")
 
 st.title("🏥 Sistema de Valorización Médica (SMG)")
@@ -123,28 +122,38 @@ if 'df_final' in st.session_state:
             df_uni['periodo_aux'] = pd.to_datetime(df_uni['Mes'], errors='coerce').dt.to_period('M')
             df_fijos['periodo_aux'] = pd.to_datetime(df_fijos['Periodo'], errors='coerce').dt.to_period('M')
 
+            # Normalizador auxiliar para comparar especialidades con/sin tilde
+            def sin_tilde(s):
+                if pd.isna(s): return ""
+                return (str(s).strip().upper()
+                        .replace('Á','A').replace('É','E').replace('Í','I')
+                        .replace('Ó','O').replace('Ú','U'))
+
+            df_f['esp_norm'] = df_f['esp_limpia'].apply(sin_tilde)
+
             # ===================================================================
-            # REGLA ESPECIAL (R_ESP): Código 42010100 según especialidad_medica
-            # Prioridad MÁXIMA — se calcula fila por fila
+            # REGLA ESPECIAL (R_ESP): Reglas por especialidad / código específico
+            # Prioridad MÁXIMA
             # ===================================================================
-            ESPECIALIDADES_CLINICA = [
-                'CLINICA MEDICA', 'CARDIOLOGIA', 'CIRUGIA GENERAL',
-                'GASTROENTEROLOGIA', 'MEDICO'
+            DESC_CLINICA = "SMG MED Consulta clinica medica"       # CLINICA, CARDIO, CIRUGIA, GASTRO
+            DESC_MEDICO  = "SMG MED Consulta medica"                # MEDICO
+            DESC_MEDGEN  = "SMG MED consulta medica"                # MEDICINA GENERAL Y/O FAMILIAR
+
+            ESPECIALIDADES_CLINICA_42 = [
+                'CLINICA MEDICA', 'CARDIOLOGIA', 'CIRUGIA GENERAL', 'GASTROENTEROLOGIA'
             ]
-            DESC_CLINICA = "SMG MED Consulta clinica medica"
-            DESC_MEDGEN = "SMG MED consulta medica"
 
             def calcular_r_esp(row):
-                if row['prest_limpia'] != '42010100':
-                    return pd.NA
-                esp = row['esp_limpia']
+                cod = row['prest_limpia']
+                esp = row['esp_norm']
                 periodo = row['periodo_aux']
                 arancel = row['cat_limpia']
 
-                # DIAGNOSTICO POR IMAGENES → Nomenclador vacío, sin Arancel
-                if esp in ('DIAGNOSTICO POR IMAGENES', 'DIAGNOSTICO POR IMÁGENES'):
+                # --- DIAGNOSTICO POR IMAGENES → SIEMPRE (cualquier código) ---
+                # Valor Fijos con Nomenclador vacío, sin Arancel, mismo código y periodo
+                if esp == 'DIAGNOSTICO POR IMAGENES':
                     m = df_fijos[
-                        (df_fijos['cod_limpio'] == '42010100') &
+                        (df_fijos['cod_limpio'] == cod) &
                         (df_fijos['periodo_aux'] == periodo) &
                         (df_fijos['Nomenclador'].isna())
                     ]
@@ -152,26 +161,49 @@ if 'df_final' in st.session_state:
                         return m['Total prestación'].iloc[0]
                     return pd.NA
 
-                # CLINICA y similares → descripción exacta "SMG MED Consulta clinica medica" + Arancel
-                if esp in ESPECIALIDADES_CLINICA:
-                    m = df_fijos[
-                        (df_fijos['cod_limpio'] == '42010100') &
-                        (df_fijos['periodo_aux'] == periodo) &
-                        (df_fijos['Descripción'] == DESC_CLINICA) &
-                        (df_fijos['cat_limpia'] == arancel)
-                    ]
-                    if not m.empty:
-                        return m['Total prestación'].iloc[0]
-                    return pd.NA
+                # --- Código 42010100: reglas por especialidad ---
+                if cod == '42010100':
+                    if esp in ESPECIALIDADES_CLINICA_42:
+                        m = df_fijos[
+                            (df_fijos['cod_limpio'] == '42010100') &
+                            (df_fijos['periodo_aux'] == periodo) &
+                            (df_fijos['Descripción'] == DESC_CLINICA) &
+                            (df_fijos['cat_limpia'] == arancel)
+                        ]
+                        if not m.empty:
+                            return m['Total prestación'].iloc[0]
+                        return pd.NA
 
-                # MEDICINA GENERAL Y/O FAMILIAR → descripción "SMG MED consulta medica", R se trata como C
-                if esp == 'MEDICINA GENERAL Y/O FAMILIAR':
-                    arancel_efectivo = 'C' if arancel == 'R' else arancel
+                    if esp == 'MEDICO':
+                        m = df_fijos[
+                            (df_fijos['cod_limpio'] == '42010100') &
+                            (df_fijos['periodo_aux'] == periodo) &
+                            (df_fijos['Descripción'] == DESC_MEDICO) &
+                            (df_fijos['cat_limpia'] == arancel)
+                        ]
+                        if not m.empty:
+                            return m['Total prestación'].iloc[0]
+                        return pd.NA
+
+                    if esp == 'MEDICINA GENERAL Y/O FAMILIAR':
+                        arancel_efectivo = 'C' if arancel == 'R' else arancel
+                        m = df_fijos[
+                            (df_fijos['cod_limpio'] == '42010100') &
+                            (df_fijos['periodo_aux'] == periodo) &
+                            (df_fijos['Descripción'] == DESC_MEDGEN) &
+                            (df_fijos['cat_limpia'] == arancel_efectivo)
+                        ]
+                        if not m.empty:
+                            return m['Total prestación'].iloc[0]
+                        return pd.NA
+
+                # --- Código 12100401: descripción que empieza con "SMG" + Arancel + periodo ---
+                if cod == '12100401':
                     m = df_fijos[
-                        (df_fijos['cod_limpio'] == '42010100') &
+                        (df_fijos['cod_limpio'] == '12100401') &
                         (df_fijos['periodo_aux'] == periodo) &
-                        (df_fijos['Descripción'] == DESC_MEDGEN) &
-                        (df_fijos['cat_limpia'] == arancel_efectivo)
+                        (df_fijos['cat_limpia'] == arancel) &
+                        (df_fijos['Descripción'].astype(str).str.startswith('SMG', na=False))
                     ]
                     if not m.empty:
                         return m['Total prestación'].iloc[0]
@@ -201,7 +233,7 @@ if 'df_final' in st.session_state:
 
             especialidades_r0 = ['OTORRINOLARINGOLOGIA', 'DERMATOLOGIA']
             mask_r0 = (
-                df_f['esp_limpia'].isin(especialidades_r0) &
+                df_f['esp_norm'].isin(especialidades_r0) &
                 (~df_f['prest_limpia'].str.startswith('4', na=False))
             )
             df_f.loc[~mask_r0, 'IMPORTE_R0'] = pd.NA
@@ -253,7 +285,7 @@ if 'df_final' in st.session_state:
             df_f['Total'] = df_f.apply(calcular_total, axis=1)
 
             df_f = df_f.drop_duplicates(subset=['transacción_item'], keep='first')
-            prohibidas = ['_limpia', '_nom_norm', 'periodo_aux', 'cod_limpio', 'cat_limpia', 'IMPORTE_R_ESP', 'IMPORTE_R0', 'IMPORTE_R1', 'Total prestación', 'Tipo de Nomenclador', 'Tipo de nomenclador', 'Código']
+            prohibidas = ['_limpia', '_nom_norm', 'esp_norm', 'periodo_aux', 'cod_limpio', 'cat_limpia', 'IMPORTE_R_ESP', 'IMPORTE_R0', 'IMPORTE_R1', 'Total prestación', 'Tipo de Nomenclador', 'Tipo de nomenclador', 'Código']
             cols_a_borrar = [c for c in df_f.columns if any(p in c for p in prohibidas) and c not in ['IMPORTE', 'Total']]
             df_final_res = df_f.drop(columns=cols_a_borrar, errors='ignore')
 
