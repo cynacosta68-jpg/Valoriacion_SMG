@@ -133,7 +133,6 @@ if 'df_final' in st.session_state:
 
             # ===================================================================
             # REGLA ESPECIAL (R_ESP): Reglas por especialidad / código específico
-            # Prioridad: códigos SMG > 42010100 por especialidad > DIAGNOSTICO POR IMAGENES
             # ===================================================================
             DESC_CLINICA = "SMG MED Consulta clinica medica"
             DESC_MEDICO  = "SMG MED Consulta medica"
@@ -143,7 +142,8 @@ if 'df_final' in st.session_state:
                 'CLINICA MEDICA', 'CARDIOLOGIA', 'CIRUGIA GENERAL', 'GASTROENTEROLOGIA'
             ]
 
-            CODIGOS_SMG = ['12100401', '220101', '18010303']
+            CODIGOS_SMG_CON_ARANCEL = ['12100401', '220101']
+            CODIGOS_SMG_SIN_ARANCEL = ['18010303']
 
             def calcular_r_esp(row):
                 cod = row['prest_limpia']
@@ -151,9 +151,19 @@ if 'df_final' in st.session_state:
                 periodo = row['periodo_aux']
                 arancel = row['cat_limpia']
 
-                # --- PRIORIDAD 1: Códigos SMG (12100401, 220101, 18010303) ---
-                # Descripción empieza con "SMG" + Arancel + periodo
-                if cod in CODIGOS_SMG:
+                # --- PRIORIDAD 1a: 18010303 → código + descripción SMG + periodo (SIN Arancel) ---
+                if cod in CODIGOS_SMG_SIN_ARANCEL:
+                    m = df_fijos[
+                        (df_fijos['cod_limpio'] == cod) &
+                        (df_fijos['periodo_aux'] == periodo) &
+                        (df_fijos['Descripción'].astype(str).str.startswith('SMG', na=False))
+                    ]
+                    if not m.empty:
+                        return m['Total prestación'].iloc[0]
+                    return pd.NA
+
+                # --- PRIORIDAD 1b: 12100401, 220101 → código + descripción SMG + Arancel + periodo ---
+                if cod in CODIGOS_SMG_CON_ARANCEL:
                     m = df_fijos[
                         (df_fijos['cod_limpio'] == cod) &
                         (df_fijos['periodo_aux'] == periodo) &
