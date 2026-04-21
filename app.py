@@ -309,11 +309,28 @@ if 'df_final' in st.session_state:
             else:
                 st.success(f"✅ ¡Éxito! Valorización completada al 100%. {len(df_final_res)} registros procesados.")
 
-            st.dataframe(df_final_res.head(100))
+            st.session_state['df_valorizado'] = df_final_res.copy()
 
+        except Exception as e:
+            st.error(f"❌ Error en Valorización: {e}")
+
+    # --- Vista editable y descarga (persiste tras reruns) ---
+    if 'df_valorizado' in st.session_state:
+        st.subheader("📝 Vista previa editable — modifique los valores que necesite")
+        st.caption("Puede editar cualquier celda haciendo doble clic. Los cambios se reflejarán en la descarga.")
+
+        df_editable = st.data_editor(
+            st.session_state['df_valorizado'],
+            num_rows="dynamic",
+            use_container_width=True,
+            key="editor_valorizado"
+        )
+
+        col1, col2 = st.columns([1, 3])
+        with col1:
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                df_final_res.to_excel(writer, index=False)
+                df_editable.to_excel(writer, index=False)
 
             st.download_button(
                 label="📥 Descargar Reporte FINAL VALORIZADO",
@@ -321,6 +338,5 @@ if 'df_final' in st.session_state:
                 file_name="reporte_valorizado_final.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
-
-        except Exception as e:
-            st.error(f"❌ Error en Valorización: {e}")
+        with col2:
+            st.info(f"📊 {len(df_editable)} registros listos para descargar (con sus modificaciones).")
