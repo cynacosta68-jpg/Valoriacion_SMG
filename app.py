@@ -2,6 +2,8 @@ import streamlit as st
 import pandas as pd
 import unicodedata
 import io
+from auth import login_required
+login_required()
 
 st.set_page_config(layout="wide", page_title="Valorizador SMG - Versión Colab")
 
